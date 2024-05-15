@@ -19,6 +19,31 @@ type People struct {
 	Age  int    `json:"age"`
 }
 
+func (ms *MapStore) get() map[string]int {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+
+	return ms.peopleMap
+}
+
+func (ms *MapStore) set(key string, value int) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	ms.peopleMap[key] = value
+}
+
+func (ms *MapStore) delete(key string) error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	_, ok := ms.peopleMap[key]
+	if !ok {
+		return fmt.Errorf("people not found %s", key)
+	}
+	delete(ms.peopleMap, key)
+	return nil
+}
+
 func NewServer() {
 	mapStore := &MapStore{peopleMap: make(map[string]int)}
 	server := &http.Server{Addr: ":8080"}
@@ -27,23 +52,21 @@ func NewServer() {
 	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
-			getHandler(w, r, mapStore.peopleMap)
+			getHandler(w, r, mapStore)
 		case "POST":
-			postHandler(w, r, mapStore.peopleMap)
+			postHandler(w, r, mapStore)
 		case "PUT":
-			updateHandler(w, r, mapStore.peopleMap)
+			updateHandler(w, r, mapStore)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	http.HandleFunc("/test/", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Path[len("/test/"):]
-		_, ok := mapStore.peopleMap[name]
-		if !ok {
-			http.Error(w, "people not found", http.StatusBadRequest)
+	http.HandleFunc("/delete/", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Path[len("/delete/"):]
+		err := mapStore.delete(name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-		fmt.Fprintln(w, name, ":", mapStore.peopleMap[name])
-		delete(mapStore.peopleMap, name)
 
 	})
 	terminate := make(chan os.Signal, 1)
@@ -65,32 +88,22 @@ func NewServer() {
 	<-terminate
 }
 
-func updateHandler(w http.ResponseWriter, r *http.Request, peopleMap map[string]int) {
+func updateHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
 	people := requestDecoder(w, r)
-	peopleMap[people.Name] = people.Age
+	ms.set(people.Name, people.Age)
 	fmt.Fprintln(w, people.Name, ":", people.Age)
 }
 
-func deleteHandler(w http.ResponseWriter, r *http.Request, peopleMap map[string]int) {
-	name := r.URL.Path[len("/test/"):]
-	_, ok := peopleMap[name]
-	if !ok {
-		http.Error(w, "people not found", http.StatusBadRequest)
-	}
-	fmt.Fprintln(w, name, ":", peopleMap[name])
-	delete(peopleMap, name)
-
-}
-
-func postHandler(w http.ResponseWriter, r *http.Request, peopleMap map[string]int) {
+func postHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
 	people := requestDecoder(w, r)
-	peopleMap[people.Name] = people.Age
+	ms.set(people.Name, people.Age)
 	fmt.Fprintln(w, people.Name, ":", people.Age)
 }
 
-func getHandler(w http.ResponseWriter, r *http.Request, peopleMap map[string]int) {
+func getHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
+	peoples := ms.get()
 	fmt.Fprintln(w, "{")
-	for k, v := range peopleMap {
+	for k, v := range peoples {
 		fmt.Fprintf(w, "  %v: %v,\n", k, v)
 	}
 	fmt.Fprintln(w, "}")
