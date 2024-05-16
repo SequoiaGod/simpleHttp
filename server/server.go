@@ -6,12 +6,46 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
+	"strconv"
 )
 
-type MapStore struct {
+type message struct {
+	command  string
+	key      string
+	value    int
+	response chan<- string
+}
+
+type mapActor struct {
 	peopleMap map[string]int
-	mu        sync.RWMutex
+	message   chan message
+}
+
+func newActor() *mapActor {
+	return &mapActor{
+		peopleMap: make(map[string]int),
+		message:   make(chan message),
+	}
+}
+
+func (m *mapActor) run() {
+	for mes := range m.message {
+		switch mes.command {
+		case "get":
+			res := "{"
+			for k, v := range m.peopleMap {
+				res += "\n" + k + ": " + strconv.Itoa(v)
+			}
+			res += "\n}"
+			mes.response <- res
+		case "put":
+			m.peopleMap[mes.key] = mes.value
+			mes.response <- fmt.Sprintf("%s:%d", mes.key, mes.value)
+		case "delete":
+			delete(m.peopleMap, mes.key)
+			mes.response <- fmt.Sprintf("%s has deleted", mes.key)
+		}
+	}
 }
 
 type People struct {
@@ -19,55 +53,45 @@ type People struct {
 	Age  int    `json:"age"`
 }
 
-func (ms *MapStore) get() map[string]int {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	return ms.peopleMap
-}
-
-func (ms *MapStore) set(key string, value int) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-
-	ms.peopleMap[key] = value
-}
-
-func (ms *MapStore) delete(key string) error {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	_, ok := ms.peopleMap[key]
-	if !ok {
-		return fmt.Errorf("people not found %s", key)
-	}
-	delete(ms.peopleMap, key)
-	return nil
-}
-
 func NewServer() {
-	mapStore := &MapStore{peopleMap: make(map[string]int)}
+
+	mapActor := newActor()
+	go mapActor.run()
 	server := &http.Server{Addr: ":8080"}
-	mapStore.peopleMap["yan"] = 25
-	mapStore.peopleMap["gin"] = 44
 	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
-			getHandler(w, r, mapStore)
+			func(w http.ResponseWriter, r *http.Request) {
+				response := make(chan string)
+				mapActor.message <- message{command: "get", response: response}
+				fmt.Fprintln(w, <-response)
+			}(w, r)
 		case "POST":
-			postHandler(w, r, mapStore)
+			func(w http.ResponseWriter, r *http.Request) {
+				people := requestDecoder(w, r)
+				response := make(chan string)
+				mapActor.message <- message{command: "put", key: people.Name, value: people.Age, response: response}
+				fmt.Fprintln(w, <-response)
+			}(w, r)
 		case "PUT":
-			updateHandler(w, r, mapStore)
+			func(w http.ResponseWriter, r *http.Request) {
+				people := requestDecoder(w, r)
+				response := make(chan string)
+				mapActor.message <- message{command: "put", key: people.Name, value: people.Age, response: response}
+				fmt.Fprintln(w, <-response)
+			}(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
 	http.HandleFunc("/delete/", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Path[len("/delete/"):]
-		err := mapStore.delete(name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if name == "" {
+			http.Error(w, "empty string", http.StatusBadRequest)
 		}
-
+		res := make(chan string)
+		mapActor.message <- message{command: "delete", key: name, response: res}
+		fmt.Fprintln(w, <-res)
 	})
 	terminate := make(chan os.Signal, 1)
 	go func() {
@@ -87,28 +111,6 @@ func NewServer() {
 
 	<-terminate
 }
-
-func updateHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
-	people := requestDecoder(w, r)
-	ms.set(people.Name, people.Age)
-	fmt.Fprintln(w, people.Name, ":", people.Age)
-}
-
-func postHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
-	people := requestDecoder(w, r)
-	ms.set(people.Name, people.Age)
-	fmt.Fprintln(w, people.Name, ":", people.Age)
-}
-
-func getHandler(w http.ResponseWriter, r *http.Request, ms *MapStore) {
-	peoples := ms.get()
-	fmt.Fprintln(w, "{")
-	for k, v := range peoples {
-		fmt.Fprintf(w, "  %v: %v,\n", k, v)
-	}
-	fmt.Fprintln(w, "}")
-}
-
 func requestDecoder(w http.ResponseWriter, r *http.Request) People {
 	decoder := json.NewDecoder(r.Body)
 	var people People
