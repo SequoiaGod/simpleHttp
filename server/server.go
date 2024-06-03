@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+var peopleMap = make(map[string]int)
+var messageChan = make(chan message)
+
 type message struct {
 	command  string
 	key      string
@@ -20,34 +23,22 @@ type message struct {
 	response chan<- string
 }
 
-type mapActor struct {
-	peopleMap map[string]int
-	message   chan message
-}
-
-func newActor() *mapActor {
-	return &mapActor{
-		peopleMap: make(map[string]int),
-		message:   make(chan message),
-	}
-}
-
-func (m *mapActor) run() {
-	for mes := range m.message {
+func run() {
+	for mes := range messageChan {
 		switch mes.command {
 		case "get":
 			var str strings.Builder
 			str.WriteString("{")
-			for k, v := range m.peopleMap {
+			for k, v := range peopleMap {
 				str.WriteString("\n" + k + ": " + strconv.Itoa(v))
 			}
 			str.WriteString("\n}")
 			mes.response <- str.String()
 		case "put":
-			m.peopleMap[mes.key] = mes.value
+			peopleMap[mes.key] = mes.value
 			mes.response <- fmt.Sprintf("%s:%d", mes.key, mes.value)
 		case "delete":
-			delete(m.peopleMap, mes.key)
+			delete(peopleMap, mes.key)
 			mes.response <- fmt.Sprintf("%s has deleted", mes.key)
 		}
 	}
@@ -86,29 +77,28 @@ func startServer(ctx context.Context, server *http.Server) error {
 
 func NewServer() {
 
-	mapActor := newActor()
-	go mapActor.run()
+	go run()
 	server := &http.Server{Addr: ":8080"}
 	http.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			func(w http.ResponseWriter, r *http.Request) {
 				response := make(chan string)
-				mapActor.message <- message{command: "get", response: response}
+				messageChan <- message{command: "get", response: response}
 				fmt.Fprintln(w, <-response)
 			}(w, r)
 		case "POST":
 			func(w http.ResponseWriter, r *http.Request) {
 				people := requestDecoder(w, r)
 				response := make(chan string)
-				mapActor.message <- message{command: "put", key: people.Name, value: people.Age, response: response}
+				messageChan <- message{command: "put", key: people.Name, value: people.Age, response: response}
 				fmt.Fprintln(w, <-response)
 			}(w, r)
 		case "PUT":
 			func(w http.ResponseWriter, r *http.Request) {
 				people := requestDecoder(w, r)
 				response := make(chan string)
-				mapActor.message <- message{command: "put", key: people.Name, value: people.Age, response: response}
+				messageChan <- message{command: "put", key: people.Name, value: people.Age, response: response}
 				fmt.Fprintln(w, <-response)
 			}(w, r)
 		default:
@@ -121,7 +111,7 @@ func NewServer() {
 			http.Error(w, "empty string", http.StatusBadRequest)
 		}
 		res := make(chan string)
-		mapActor.message <- message{command: "delete", key: name, response: res}
+		messageChan <- message{command: "delete", key: name, response: res}
 		fmt.Fprintln(w, <-res)
 	})
 	terminate := make(chan os.Signal, 1)
