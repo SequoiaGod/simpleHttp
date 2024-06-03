@@ -1,12 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"time"
 )
 
 type message struct {
@@ -32,12 +36,13 @@ func (m *mapActor) run() {
 	for mes := range m.message {
 		switch mes.command {
 		case "get":
-			res := "{"
+			var str strings.Builder
+			str.WriteString("{")
 			for k, v := range m.peopleMap {
-				res += "\n" + k + ": " + strconv.Itoa(v)
+				str.WriteString("\n" + k + ": " + strconv.Itoa(v))
 			}
-			res += "\n}"
-			mes.response <- res
+			str.WriteString("\n}")
+			mes.response <- str.String()
 		case "put":
 			m.peopleMap[mes.key] = mes.value
 			mes.response <- fmt.Sprintf("%s:%d", mes.key, mes.value)
@@ -51,6 +56,32 @@ func (m *mapActor) run() {
 type People struct {
 	Name string `json:"name"`
 	Age  int    `json:"age"`
+}
+
+func startServer(ctx context.Context, server *http.Server) error {
+	var err error
+
+	go func() {
+		if err = server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Println(err)
+		}
+	}()
+	<-ctx.Done()
+	log.Println("server stopped")
+
+	ctxShutDown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer func() {
+		cancel()
+	}()
+	if err = server.Shutdown(ctxShutDown); err != nil {
+		log.Println(err)
+	}
+
+	if err == http.ErrServerClosed {
+		err = nil
+	}
+	return err
+
 }
 
 func NewServer() {
@@ -94,22 +125,19 @@ func NewServer() {
 		fmt.Fprintln(w, <-res)
 	})
 	terminate := make(chan os.Signal, 1)
-	go func() {
-		err := server.ListenAndServe()
-		if err != nil {
-			log.Fatal("server error: ", err)
-		}
-	}()
+	signal.Notify(terminate, os.Interrupt)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if err := startServer(ctx, server); err != nil {
+		log.Println(err)
+	}
 
 	go func() {
 		<-terminate
-		err := server.Close()
-		if err != nil {
-			log.Fatal("server error: ", err)
-		}
+		log.Println("system closing---")
+		cancel()
 	}()
 
-	<-terminate
 }
 func requestDecoder(w http.ResponseWriter, r *http.Request) People {
 	decoder := json.NewDecoder(r.Body)
