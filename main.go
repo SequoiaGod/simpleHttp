@@ -6,6 +6,7 @@ import (
 )
 
 func main() {
+
 	fmt.Println("starting server")
 	server.NewServer()
 
